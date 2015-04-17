@@ -141,7 +141,7 @@
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: stdio forward request sent", __func__);
-@@ -2185,3 +2256,112 @@
+@@ -2185,3 +2256,111 @@
  		fatal("unrecognised muxclient_command %d", muxclient_command);
  	}
  }
@@ -230,12 +230,11 @@
 +	return fdpass;
 +}
 +
-+#define BUFFER_SIZE 1024
 +static int mux_redirect(int source, int target){
-+	static char buffer[BUFFER_SIZE+1];
++	static char buffer[SSH_IOBUFSZ+1];
 +	int result;
 +	do {
-+		result = read(source, buffer, BUFFER_SIZE);
++		result = read(source, buffer, SSH_IOBUFSZ);
 +	} while (result == -1 && errno == EINTR);
 +
 +	if (result > 0) {
