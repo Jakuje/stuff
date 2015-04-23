@@ -1,0 +1,134 @@
+From dc2c133d0ad396849baf900277def50b24fc94fe Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Tue, 21 Apr 2015 10:55:20 +0200
+Subject: [PATCH] Extended remote to remote with error handling
+
+---
+ scp.c | 87 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/scp.c b/scp.c
+index 4cf1679..6bf0328 100644
+--- a/scp.c
++++ b/scp.c
+@@ -296,6 +296,39 @@ do_cmd(char *host, char *remuser, char *cmd, int *fdin, int *fdout)
+ }
+ 
+ /*
++ * Function to handle IO for extended remote to remote transfer
++ * and catch errors
++ */
++int
++scp_resend(int source, int target)
++{
++	static char buffer[COPY_BUFLEN+1];
++	int result;
++	do {
++		result = read(source, buffer, COPY_BUFLEN);
++	} while (result == -1 && errno == EINTR);
++	buffer[result] = '\0';
++	//printf("Redirecting %d -> %d data: `%s`\n", source, target, buffer);
++
++	if (result > 0) {
++		result = write(target, buffer, result);
++		if (buffer[0] == '\01' || buffer[0] == '\02') {
++			result = write(STDERR_FILENO, buffer+1, result); // skip first bit
++			//if (buffer[0] == '\02')
++				//return -1; // fail later when parent close connection
++		}
++		return result; // written
++	} else if (result == 0){
++		//printf("Closing fd %d\n", source);
++		close(target);
++		return result; // close
++	} else {
++		printf("Error in read(): %s\n", strerror(errno));
++		return -1;
++	}
++}
++
++/*
+  * This functions executes a command simlar to do_cmd(), but expects the
+  * input and output descriptors to be setup by a previous call to do_cmd().
+  * This way the input and output of two commands can be connected.
+@@ -305,6 +338,7 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ {
+ 	pid_t pid;
+ 	int status;
++	int pin[2], pout[2], reserved[2];
+ 
+ 	if (verbose_mode)
+ 		fprintf(stderr,
+@@ -312,11 +346,32 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ 		    ssh_program, host,
+ 		    remuser ? remuser : "(unspecified)", cmd);
+ 
++	/*
++	 * Reserve two descriptors so that the real pipes won't get
++	 * descriptors 0 and 1 because that will screw up dup2 below.
++	 */
++	if (pipe(reserved) < 0) // TODO ??? is it required now???
++		fatal("pipe: %s", strerror(errno));
++
++	/* Create a socket pair for communicating with ssh. */
++	if (pipe(pin) < 0)
++		fatal("pipe: %s", strerror(errno));
++	if (pipe(pout) < 0)
++		fatal("pipe: %s", strerror(errno));
++
++	/* Free the reserved descriptors. */
++	close(reserved[0]);
++	close(reserved[1]);
++
+ 	/* Fork a child to execute the command on the remote host using ssh. */
+ 	pid = fork();
+ 	if (pid == 0) {
+-		dup2(fdin, 0);
+-		dup2(fdout, 1);
++		close(pin[1]);
++		close(pout[0]);
++		dup2(pin[0], 0);
++		dup2(pout[1], 1);
++		close(pin[0]);
++		close(pout[1]);
+ 
+ 		replacearg(&args, 0, "%s", ssh_program);
+ 		if (remuser != NULL) {
+@@ -333,6 +388,34 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ 	} else if (pid == -1) {
+ 		fatal("fork: %s", strerror(errno));
+ 	}
++	close(pin[0]);
++	close(pout[1]);
++	fd_set readset, activeset;
++	int maxfd, res, active = 2;
++	FD_ZERO(&readset);
++	FD_SET(pout[0], &readset);
++	FD_SET(fdin, &readset);
++	maxfd = fdin > pout[0] ? fdin : pout[0];
++	do {
++		activeset = readset;
++		res = select(maxfd+1, &activeset, NULL, NULL, NULL);
++		//printf("select returned %d\n", res);
++		if (res < 0){
++			perror("select");
++			break;
++		} else {
++			// connect fdin    to pin[1]
++			if (FD_ISSET(fdin, &activeset))
++				res = scp_resend(fdin, pin[1]);
++			if (res <= 0)
++				active--;
++			// connect pout[0] to fdout
++			if (FD_ISSET(pout[0], &activeset))
++				res = scp_resend(pout[0], fdout);
++			if (res <= 0)
++				active--;
++		}
++	} while (active);
+ 	while (waitpid(pid, &status, 0) == -1)
+ 		if (errno != EINTR)
+ 			fatal("do_cmd2: waitpid: %s", strerror(errno));
+-- 
+2.1.0
+

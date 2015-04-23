@@ -1,0 +1,277 @@
+diff --git a/scp.c b/scp.c
+index 4cf1679..bdc6786 100644
+--- a/scp.c
++++ b/scp.c
+@@ -295,6 +295,59 @@ do_cmd(char *host, char *remuser, char *cmd, int *fdin, int *fdout)
+ 	return 0;
+ }
+ 
++static int scpio(void *, size_t);
++
++/* 
++ * Read and forward SCP reponse, error messages dupplicate to stderr
++ * return value determines if FSM continues or ends (pipe closed, fatal errors)
++ */
++int
++handle_accept(int fdin, int fdout, char *buffer)
++{
++	char *ch = buffer;
++
++	/* read first byte */
++	int res = atomicio(read, fdin, buffer, 1);
++	if (res == 0){
++		close(fdout);
++		return 0; //active = 0;
++	}
++	if (buffer[0] == '\01' || buffer[0] == '\02') {
++		ch = buffer + 1;
++
++		/* read the rest of input */
++		do {
++			res = read(fdin, ch, COPY_BUFLEN-1);
++		} while (res == -1 && errno == EINTR);
++		if (res == 0) {
++			close(fdout);
++			return 0; // active = 0
++		}
++		(void) atomicio(vwrite, STDERR_FILENO, ch, res);
++		(void) atomicio(vwrite, fdout, buffer, res+1);
++		if (buffer[0] == '\02')
++			return 0; // active = 0
++		return 1; // active = 1;
++	} else
++		(void) atomicio(vwrite, fdout, buffer, 1);
++	//printf("Write %d -> %d data: `%s`\n", fdin, fdout, buffer);
++	return 1; // active = 1
++}
++
++/*
++ * Unified handling of broken SCP protocol in FSM, or synchronization,
++ * which is signalized by invalid input in states
++ */
++int
++break_protocol(int state, int fdin, int fdout)
++{
++	char ch;
++	if (atomicio(read, fdin, &ch, 1) == 0)
++		close(fdout);
++	fprintf(stderr, "BROKEN PROTOCOL: State: %d, Write %d -> %d data: `%c`\n", state, fdin, fdout, ch);
++	return 0; // active = 0
++}
++
+ /*
+  * This functions executes a command simlar to do_cmd(), but expects the
+  * input and output descriptors to be setup by a previous call to do_cmd().
+@@ -305,6 +358,7 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ {
+ 	pid_t pid;
+ 	int status;
++	int pin[2], pout[2], reserved[2];
+ 
+ 	if (verbose_mode)
+ 		fprintf(stderr,
+@@ -312,11 +366,32 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ 		    ssh_program, host,
+ 		    remuser ? remuser : "(unspecified)", cmd);
+ 
++	/*
++	 * Reserve two descriptors so that the real pipes won't get
++	 * descriptors 0 and 1 because that will screw up dup2 below.
++	 */
++	if (pipe(reserved) < 0)
++		fatal("pipe: %s", strerror(errno));
++
++	/* Create a socket pair for communicating with ssh. */
++	if (pipe(pin) < 0)
++		fatal("pipe: %s", strerror(errno));
++	if (pipe(pout) < 0)
++		fatal("pipe: %s", strerror(errno));
++
++	/* Free the reserved descriptors. */
++	close(reserved[0]);
++	close(reserved[1]);
++
+ 	/* Fork a child to execute the command on the remote host using ssh. */
+ 	pid = fork();
+ 	if (pid == 0) {
+-		dup2(fdin, 0);
+-		dup2(fdout, 1);
++		close(pin[0]);
++		close(pout[1]);
++		dup2(pin[1], 1);
++		dup2(pout[0], 0);
++		close(pin[1]);
++		close(pout[0]);
+ 
+ 		replacearg(&args, 0, "%s", ssh_program);
+ 		if (remuser != NULL) {
+@@ -333,6 +408,169 @@ do_cmd2(char *host, char *remuser, char *cmd, int fdin, int fdout)
+ 	} else if (pid == -1) {
+ 		fatal("fork: %s", strerror(errno));
+ 	}
++	close(pin[1]);
++	close(pout[0]);
++
++	typedef enum {START, ACCEPT, TRANSFER_ACCEPT, TRANSFER} state_t;
++	state_t state = START;
++	fd_set readset, activeset;
++	int maxfd, res, active = 1, ptr, amt;
++	off_t size, statbytes, i;
++	static char buffer[COPY_BUFLEN+1];
++	char *filename = NULL;
++	size_t filename_size = 0, filename_length, j;
++
++	/* Prepare select structures */
++	FD_ZERO(&readset);
++	FD_SET(pin[0], &readset);
++	FD_SET(fdin, &readset);
++	maxfd = fdin > pin[0] ? fdin : pin[0];
++	do {
++		activeset = readset;
++		res = select(maxfd+1, &activeset, NULL, NULL, NULL);
++		if (res < 0) {
++			perror("select");
++			break;
++		} else {
++			/* FSM doing forwarding between pipes */
++			/*      fdin   -->  pout[1]           */
++			/*      pin[0] -->  fdout             */
++			switch (state) {
++				case START:
++					/*                       START                      */
++					/* Accept confirmation signal from destination      */
++					//printf("  START: \n");
++					if (FD_ISSET(pin[0], &activeset)) { // destination -> source
++						active = handle_accept(pin[0], fdout, buffer);
++						state = ACCEPT;
++					}
++					if (FD_ISSET(fdin, &activeset)) { // source -> destination
++						active = break_protocol(state, fdin, pout[1]);
++					}
++					break;
++				case ACCEPT:
++					/*                      ACCEPT                        */
++					/* Destination is alive so source will send metadata  */
++					//printf("  ACCEPT: \n");
++					if (FD_ISSET(pin[0], &activeset)) { // destination -> source
++						active = break_protocol(state, pin[0], fdout);
++					}
++					if (FD_ISSET(fdin, &activeset)) { // source -> destination
++						/* read all you can until you reach for end of line */
++						do {
++							res = read(fdin, buffer, COPY_BUFLEN);
++						} while (res == -1 && errno == EINTR);
++						if (res == 0){
++							close(pout[1]);
++							active = 0;
++							break;
++						}
++						/* Forward it to destination */
++						(void) atomicio(vwrite, pout[1], buffer, res);
++						//buffer[res] = '\0';
++						//printf("Write %d -> %d data: `%s`\n", fdin, pout[1], buffer);
++
++						/* Parse out file size and file name for progressmeter */
++						if (buffer[0] == 'C') {
++							ptr = 6; // skip initial C, 4 bytes mode and space
++							for(size = 0; isdigit((unsigned char) buffer[ptr]);)
++								size = size * 10 + (buffer[ptr++] - '0');
++							if (showprogress) {
++								ptr++;
++								filename_length = (int)(strchr(buffer+ptr, '\n')-buffer-ptr);
++								if (filename_length >= filename_size) {
++									filename_size = filename_length + 50;
++									// extend little bit more to avoid further reallocs
++									filename = realloc(filename, (filename_size)*sizeof(char));
++									if (filename == NULL) {
++										fprintf(stderr, "Failed to allocate memory for progressmeter, disabling\n");
++										showprogress = 0;
++										filename_size = 0;
++									}
++								}
++								strncpy(filename, buffer+ptr, filename_length);
++								filename[filename_length] = '\0';
++							}
++							state = TRANSFER_ACCEPT;
++						/* Directory, end of directory and times are just passed along */
++						} else if (buffer[0] == 'D' || buffer[0] == 'E' || buffer[0] == 'T')
++							state = START;
++						/* Errors are written out. Fatal errors end cycle */
++						else if (buffer[0] == '\01' || buffer[0] == '\02') {
++							(void) atomicio(vwrite, STDERR_FILENO, buffer + 1, res-1);
++							if (buffer[0] == '\02')
++								active = 0;
++							state = ACCEPT;
++						} else {
++							fprintf(stderr, "Received unexpedced string from source: `%s`", buffer);
++							active = 0;
++						}
++					}
++					break;
++				case TRANSFER_ACCEPT:
++					/*                  TRANFER_ACCEPT                    */
++					/* Source is ready, wait for destination to confirm   */
++					//printf("  TRANSFER_ACCEPT: \n");
++					if (FD_ISSET(pin[0], &activeset)) { // destination -> source
++						active = handle_accept(pin[0], fdout, buffer);
++						state = TRANSFER;
++					}
++					if (FD_ISSET(fdin, &activeset)) { // source -> destination
++						active = break_protocol(state, fdin, pout[1]);
++					}
++					break;
++				case TRANSFER:
++					/*                      TRANSFER                         */
++					/* Source is sending data, we are handling progressmeter */
++					//printf("  TRANSFER: \n");
++					if (FD_ISSET(pin[0], &activeset)) { // destination -> source
++						active = break_protocol(state, fdin, pout[1]);
++					}
++					if (FD_ISSET(fdin, &activeset)) { // source -> destination
++						if (showprogress) {
++							statbytes = 0;
++							start_progress_meter(filename, size, &statbytes);
++						}
++						set_nonblock(fdin);
++						for (i = 0; i < size; i += COPY_BUFLEN) {
++							/* How much we can read? */
++							amt = COPY_BUFLEN;
++							if (i + (off_t)amt > size)
++								amt = size - i;
++							do {
++								j = atomicio(read, fdin, buffer, amt);
++								if (j == 0) {
++									active = 0;
++									close(pout[1]);
++									break;
++								}
++								//buffer[amt] = '\0';
++								//printf("Write %d -> %d data: `%s`\n", fdin, pout[1], buffer);
++								j = atomicio6(vwrite, pout[1], buffer, amt,
++									scpio, &statbytes);
++								amt -= j;
++							} while (amt > 0);
++						}
++						unset_nonblock(fdin);
++						if (showprogress) {
++							stop_progress_meter();
++						}
++						/* Confirm end of data without error*/
++						active = handle_accept(fdin, pout[1], buffer);
++						state = START;
++					}
++					break;
++				default:
++					fprintf(stderr, "Unknown state\n");
++					active = 0;
++					break;
++			}
++		}
++	} while (active);
++
++	/* cleanup filename if it was used */
++	if (filename_size > 0)
++		free(filename);
+ 	while (waitpid(pid, &status, 0) == -1)
+ 		if (errno != EINTR)
+ 			fatal("do_cmd2: waitpid: %s", strerror(errno));
