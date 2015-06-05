@@ -1,5 +1,7 @@
---- openssh-6.8p1.orig/mux.c	2015-03-17 06:49:20.000000000 +0100
-+++ openssh-6.8p1/mux.c	2015-04-16 13:12:58.500000000 +0200
+diff --git a/mux.c b/mux.c
+index cdc01bd..a563c3a 100644
+--- a/mux.c
++++ b/mux.c
 @@ -29,6 +29,7 @@
   *   - If we ever support the "signal" channel request, send signals on
   *     sessions in master.
@@ -8,7 +10,7 @@
  
  #include "includes.h"
  
-@@ -146,6 +147,7 @@
+@@ -146,6 +147,7 @@ struct mux_master_state {
  #define MUX_C_CLOSE_FWD		0x10000007
  #define MUX_C_NEW_STDIO_FWD	0x10000008
  #define MUX_C_STOP_LISTENING	0x10000009
@@ -16,15 +18,15 @@
  #define MUX_S_OK		0x80000001
  #define MUX_S_PERMISSION_DENIED	0x80000002
  #define MUX_S_FAILURE		0x80000003
-@@ -172,6 +174,15 @@
+@@ -172,6 +174,15 @@ static int process_mux_close_fwd(u_int, Channel *, Buffer *, Buffer *);
  static int process_mux_stdio_fwd(u_int, Channel *, Buffer *, Buffer *);
  static int process_mux_stop_listening(u_int, Channel *, Buffer *, Buffer *);
  
 +#ifdef __NO_FDPASS
 +int muxfd[3];
-+char *muxpipe[3];
++char *muxsock[3];
 +
-+static int mux_client_fdpass(int, int);
++static int mux_client_fdpass(int, int, int);
 +static int process_mux_fdpass(int);
 +static int mux_redirect(int, int);
 +#endif
@@ -32,47 +34,54 @@
  static const struct {
  	u_int type;
  	int (*handler)(u_int, Channel *, Buffer *, Buffer *);
-@@ -373,7 +384,11 @@
+@@ -372,8 +383,15 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
+ 	cmd = NULL;
  
  	/* Gather fds from client */
- 	for(i = 0; i < 3; i++) {
 +#ifdef __NO_FDPASS
-+		if ((new_fd[i] = process_mux_fdpass(c->sock)) == -1) {
++	for(i = 1; i < 3; i++) {
++		if ((new_fd[i] = process_mux_fdpass(c->sock)) > 0) {
++			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
++		} else {
 +#else
+ 	for(i = 0; i < 3; i++) {
  		if ((new_fd[i] = mm_receive_fd(c->sock)) == -1) {
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
  			for (j = 0; j < i; j++)
-@@ -434,6 +449,8 @@
+@@ -434,6 +452,8 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
  	/* Try to pick up ttymodes from client before it goes raw */
  	if (cctx->want_tty && tcgetattr(new_fd[0], &cctx->tio) == -1)
  		error("%s: tcgetattr: %s", __func__, strerror(errno));
-+	// TODO tcgetattr fails on pipe. We can send attributes
-+	// the same way we send the rest information
++	// TODO tcgetattr fails on socket. We can send attributes
++	// the same way we send the rest information???
  
  	/* enable nonblocking unless tty */
  	if (!isatty(new_fd[0]))
-@@ -946,7 +963,11 @@
+@@ -958,8 +978,15 @@ process_mux_stdio_fwd(u_int rid, Channel *c, Buffer *m, Buffer *r)
+ 	    __func__, c->self, chost, cport);
  
  	/* Gather fds from client */
- 	for(i = 0; i < 2; i++) {
 +#ifdef __NO_FDPASS
-+		if ((new_fd[i] = process_mux_fdpass(c->sock)) == -1) {
++	for(i = 1; i < 2; i++) {
++		if ((new_fd[i] = process_mux_fdpass(c->sock)) > 0) {
++			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
++		} else {
 +#else
+ 	for(i = 0; i < 2; i++) {
  		if ((new_fd[i] = mm_receive_fd(c->sock)) == -1) {
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
  			for (j = 0; j < i; j++)
-@@ -1829,9 +1850,15 @@
+@@ -1842,9 +1869,14 @@ mux_client_request_session(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
 +#ifdef __NO_FDPASS
-+	if (mux_client_fdpass(fd, STDIN_FILENO) == -1 || 
-+	    mux_client_fdpass(fd, STDOUT_FILENO) == -1 || 
-+	    mux_client_fdpass(fd, STDERR_FILENO) == -1)
++	if (mux_client_fdpass(fd, STDIN_FILENO, STDOUT_FILENO) == -1 ||
++	    mux_client_fdpass(fd, -1, STDERR_FILENO) == -1)
 +#else
  	if (mm_send_fd(fd, STDIN_FILENO) == -1 ||
  	    mm_send_fd(fd, STDOUT_FILENO) == -1 ||
@@ -81,7 +90,7 @@
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: session request sent", __func__);
-@@ -1881,6 +1908,45 @@
+@@ -1894,6 +1926,44 @@ mux_client_request_session(int fd)
  	if (tty_flag)
  		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
  
@@ -90,12 +99,11 @@
 +	int maxfd, res;
 +	FD_ZERO(&readset);
 +	FD_SET(STDIN_FILENO, &readset);
-+	FD_SET(muxfd[STDOUT_FILENO], &readset);
-+	FD_SET(muxfd[STDERR_FILENO], &readset);
++	FD_SET(muxfd[1], &readset);
++	if (muxfd[2] > -1)
++		FD_SET(muxfd[2], &readset);
 +	FD_SET(fd, &readset);
-+	maxfd = muxfd[STDOUT_FILENO] > muxfd[STDERR_FILENO] ?
-+		muxfd[STDOUT_FILENO] : muxfd[STDERR_FILENO] ;
-+	maxfd = fd > maxfd ? fd : maxfd;
++	maxfd = MAX(MAX(muxfd[1], muxfd[2]), fd);
 +	do {
 +		activeset = readset;
 +		res = select(maxfd+1, &activeset, NULL, NULL, NULL);
@@ -105,35 +113,34 @@
 +			break;
 +		} else {
 +			if (FD_ISSET(STDIN_FILENO, &activeset))
-+				mux_redirect(STDIN_FILENO, muxfd[STDIN_FILENO]);
-+			if (FD_ISSET(muxfd[STDOUT_FILENO], &activeset))
-+				mux_redirect(muxfd[STDOUT_FILENO], STDOUT_FILENO);
++				mux_redirect(STDIN_FILENO, muxfd[1]);
++			if (FD_ISSET(muxfd[1], &activeset))
++				mux_redirect(muxfd[1], STDOUT_FILENO);
 +			if (FD_ISSET(muxfd[STDERR_FILENO], &activeset))
-+				mux_redirect(muxfd[STDERR_FILENO], STDERR_FILENO);
++				mux_redirect(muxfd[2], STDERR_FILENO);
 +			if (FD_ISSET(fd, &activeset))
 +				goto cleanup;
 +			// TODO handle closed fds?
 +		}
 +	} while(1);
 +cleanup:
-+	for(i = 0; i <=2; i++){
++	for(i = 1; i < 3; i++) {
 +		close(muxfd[i]);
-+		if (muxpipe[i] != NULL){
-+			unlink(muxpipe[i]);
-+			free(muxpipe[i]);
++		if (muxsock[i] != NULL) {
++			unlink(muxsock[i]);
++			free(muxsock[i]);
 +		}
 +	}
 +#endif
  	/*
  	 * Stick around until the controlee closes the client_fd.
  	 * Before it does, it is expected to write an exit message.
-@@ -1975,8 +2041,13 @@
+@@ -1988,8 +2058,12 @@ mux_client_request_stdio_fwd(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
 +#ifdef __NO_FDPASS
-+	if (mux_client_fdpass(fd, STDIN_FILENO) == -1 || 
-+	    mux_client_fdpass(fd, STDOUT_FILENO) == -1)
++	if (mux_client_fdpass(fd, STDIN_FILENO, STDOUT_FILENO) == -1)
 +#else
  	if (mm_send_fd(fd, STDIN_FILENO) == -1 ||
  	    mm_send_fd(fd, STDOUT_FILENO) == -1)
@@ -141,21 +148,22 @@
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: stdio forward request sent", __func__);
-@@ -2185,3 +2256,111 @@
+@@ -2198,3 +2272,127 @@ muxclient(const char *path)
  		fatal("unrecognised muxclient_command %d", muxclient_command);
  	}
  }
 +
 +#ifdef __NO_FDPASS
 +static int
-+mux_client_fdpass(int fd, int fdpass)
++mux_client_fdpass(int fd, int fdpass_in, int fdpass_out)
 +{
 +	Buffer m;
 +	char rbuf[16+1];
 +	char *path;
 +	char r;
-+	int ffd;
++	int ffd, sock, t;
 +	size_t i;
++	struct sockaddr_un remote;
 +
 +	debug3("%s: entering", __func__);
 +
@@ -166,37 +174,38 @@
 +		    '0' + r - 26 - 26;
 +	}
 +	rbuf[sizeof(rbuf) - 1] = '\0';
-+	if (asprintf(&path, "%s.fdpass.%s", options.control_path, rbuf) < 0){
++	if (asprintf(&path, "%s.fdpass.%s", options.control_path, rbuf) < 0) {
 +		error("%s: asprintf: %s", __func__, strerror(errno));
 +		return -1;
 +	}
-+	if (mkfifo(path, O_RDWR) != 0){
++	if ((sock = unix_listener(path, 1, 0)) < 0) {
 +		free(path);
-+		error("%s: mkfifo: %s", __func__, strerror(errno));
++		error("%s: socket: %s", __func__, strerror(errno));
 +		return -1;
 +	}
-+	debug3("%s: emulating fdpass through fifo %s", __func__, path);
-+	if ((ffd = open(path, O_RDWR)) < 0){
-+		free(path);
-+		error("%s: open: %s", __func__, strerror(errno));
-+		return -1;
-+	}
++	debug3("%s: emulating fdpass through socket %s", __func__, path);
 +
 +	buffer_init(&m);
 +	buffer_put_int(&m, MUX_C_FDPASS);
 +	buffer_put_cstring(&m, path);
-+	if (mux_client_write_packet(fd, &m) != 0){
++	if (mux_client_write_packet(fd, &m) != 0) {
 +		free(path);
 +		buffer_free(&m);
 +		error("%s: failed to write packet to mux", __func__);
 +		return -1;
 +	}
++	buffer_free(&m);
 +
 +	//printf("muxfd[%d] = %d\n", fdpass, ffd);
-+	muxfd[fdpass] = ffd;
-+	muxpipe[fdpass] = path;
++	if ((ffd = accept(sock, (struct sockaddr *)&remote, &t)) < 0) {
++		free(path);
++		error("%s: accept: %s", __func__, strerror(errno));
++		return -1;
++	}
 +
-+	buffer_free(&m);
++	muxfd[fdpass_out] = ffd; // stores only 1=>I/O 2=>ERR
++	muxsock[fdpass_out] = path;
++
 +	return 0;
 +}
 +
@@ -204,33 +213,47 @@
 +process_mux_fdpass(int fd)
 +{
 +	Buffer m;
-+	int fdpass, msg_id;
++	int msg_id, sock, len;
 +	char *path;
 +	u_int n;
++	struct sockaddr_un remote;
 +
 +	buffer_init(&m);
 +	if (mux_client_read_packet(fd, &m) != 0) {
 +		buffer_free(&m);
-+		return 0;
++		return -1;
 +	}
 +
 +	msg_id = buffer_get_int(&m);
 +	path = buffer_get_cstring(&m, &n);
++	buffer_free(&m);
 +	if (msg_id != MUX_C_FDPASS)
-+		error("%s: Received wrong message id instead of passed pipe", __func__);
++		error("%s: Received wrong message id instead of passed socket", __func__);
 +
-+	debug3("%s: received fifo %s to emulate fdpass", __func__, path);
-+	if ((fdpass = open(path, O_RDWR)) < 0){
-+		error("%s: open: %s", __func__, strerror(errno));
++	debug3("%s: received socket %s to emulate fdpass", __func__, path);
++	if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
++		error("%s: socket: %s", strerror(errno));
++		return -1;
++	}
++	memset(&remote, 0, sizeof(remote));
++	remote.sun_family = AF_UNIX;
++	if (strlcpy(remote.sun_path, path,
++	    sizeof(remote.sun_path)) >= sizeof(remote.sun_path)) {
++		error("ControlPath too long");
++		return -1;
++	}
++	len = offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1;
++	if (connect(sock, (struct sockaddr *)&remote, len) < 0) {
++		error("%s: connect: %s", __func__, strerror(errno));
 +		return -1;
 +	}
 +
 +	free(path);
-+	buffer_free(&m);
-+	return fdpass;
++	return sock;
 +}
 +
-+static int mux_redirect(int source, int target){
++static int mux_redirect(int source, int target)
++{
 +	static char buffer[SSH_IOBUFSZ+1];
 +	int result;
 +	do {
@@ -241,14 +264,14 @@
 +		result = write(target, buffer, result);
 +		//buffer[result] = 0;
 +		//debug3("Redirecting %d -> %d data: %s\n", source, target, buffer);
-+		return result; // written
-+	} else if (result == 0){
++		return result; // written size
++	} else if (result == 0) {
 +		//close, FD_CLEAR
-+		printf("Closing fd %d", source);
++		printf("Closing fd %d\n", source);
 +		close(target);
-+		return result; // close
++		return result; // propagete close?
 +	} else {
-+		printf("Error in recv(): %s\n", strerror(errno));
++		printf("Error in read(): %s\n", strerror(errno));
 +		return -1;
 +	}
 +}
