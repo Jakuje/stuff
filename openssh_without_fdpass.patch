@@ -1,5 +1,5 @@
 diff --git a/mux.c b/mux.c
-index cdc01bd..a563c3a 100644
+index cdc01bd..c8d3c5a 100644
 --- a/mux.c
 +++ b/mux.c
 @@ -29,6 +29,7 @@
@@ -34,7 +34,7 @@ index cdc01bd..a563c3a 100644
  static const struct {
  	u_int type;
  	int (*handler)(u_int, Channel *, Buffer *, Buffer *);
-@@ -372,8 +383,15 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
+@@ -372,11 +383,22 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
  	cmd = NULL;
  
  	/* Gather fds from client */
@@ -49,8 +49,15 @@ index cdc01bd..a563c3a 100644
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
++#ifdef __NO_FDPASS
  			for (j = 0; j < i; j++)
-@@ -434,6 +452,8 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
++#else
++			for (j = 1; j < i; j++)
++#endif
+ 				close(new_fd[j]);
+ 			for (j = 0; j < env_len; j++)
+ 				free(cctx->env[j]);
+@@ -434,6 +456,8 @@ process_mux_new_session(u_int rid, Channel *c, Buffer *m, Buffer *r)
  	/* Try to pick up ttymodes from client before it goes raw */
  	if (cctx->want_tty && tcgetattr(new_fd[0], &cctx->tio) == -1)
  		error("%s: tcgetattr: %s", __func__, strerror(errno));
@@ -59,7 +66,7 @@ index cdc01bd..a563c3a 100644
  
  	/* enable nonblocking unless tty */
  	if (!isatty(new_fd[0]))
-@@ -958,8 +978,15 @@ process_mux_stdio_fwd(u_int rid, Channel *c, Buffer *m, Buffer *r)
+@@ -958,11 +982,22 @@ process_mux_stdio_fwd(u_int rid, Channel *c, Buffer *m, Buffer *r)
  	    __func__, c->self, chost, cport);
  
  	/* Gather fds from client */
@@ -74,8 +81,15 @@ index cdc01bd..a563c3a 100644
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
++#ifdef __NO_FDPASS
++			for (j = 1; j < i; j++)
++#else
  			for (j = 0; j < i; j++)
-@@ -1842,9 +1869,14 @@ mux_client_request_session(int fd)
++#endif
+ 				close(new_fd[j]);
+ 			free(chost);
+ 
+@@ -1842,9 +1877,14 @@ mux_client_request_session(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
@@ -90,13 +104,13 @@ index cdc01bd..a563c3a 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: session request sent", __func__);
-@@ -1894,6 +1926,44 @@ mux_client_request_session(int fd)
+@@ -1894,6 +1934,43 @@ mux_client_request_session(int fd)
  	if (tty_flag)
  		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
  
 +#ifdef __NO_FDPASS
 +	fd_set readset, activeset;
-+	int maxfd, res;
++	int maxfd, res, written = 1;
 +	FD_ZERO(&readset);
 +	FD_SET(STDIN_FILENO, &readset);
 +	FD_SET(muxfd[1], &readset);
@@ -113,14 +127,13 @@ index cdc01bd..a563c3a 100644
 +			break;
 +		} else {
 +			if (FD_ISSET(STDIN_FILENO, &activeset))
-+				mux_redirect(STDIN_FILENO, muxfd[1]);
++				written = mux_redirect(STDIN_FILENO, muxfd[1]);
 +			if (FD_ISSET(muxfd[1], &activeset))
-+				mux_redirect(muxfd[1], STDOUT_FILENO);
++				written = mux_redirect(muxfd[1], STDOUT_FILENO);
 +			if (FD_ISSET(muxfd[STDERR_FILENO], &activeset))
-+				mux_redirect(muxfd[2], STDERR_FILENO);
-+			if (FD_ISSET(fd, &activeset))
-+				goto cleanup;
-+			// TODO handle closed fds?
++				written = mux_redirect(muxfd[2], STDERR_FILENO);
++			if (FD_ISSET(fd, &activeset) || written == 0)
++				goto cleanup; // close request or closed FDs
 +		}
 +	} while(1);
 +cleanup:
@@ -135,7 +148,7 @@ index cdc01bd..a563c3a 100644
  	/*
  	 * Stick around until the controlee closes the client_fd.
  	 * Before it does, it is expected to write an exit message.
-@@ -1988,8 +2058,12 @@ mux_client_request_stdio_fwd(int fd)
+@@ -1988,8 +2065,12 @@ mux_client_request_stdio_fwd(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
@@ -148,7 +161,7 @@ index cdc01bd..a563c3a 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: stdio forward request sent", __func__);
-@@ -2198,3 +2272,127 @@ muxclient(const char *path)
+@@ -2198,3 +2279,127 @@ muxclient(const char *path)
  		fatal("unrecognised muxclient_command %d", muxclient_command);
  	}
  }
@@ -232,7 +245,7 @@ index cdc01bd..a563c3a 100644
 +
 +	debug3("%s: received socket %s to emulate fdpass", __func__, path);
 +	if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
-+		error("%s: socket: %s", strerror(errno));
++		error("%s: socket: %s", __func__, strerror(errno));
 +		return -1;
 +	}
 +	memset(&remote, 0, sizeof(remote));
