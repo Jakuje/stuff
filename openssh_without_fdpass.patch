@@ -1,5 +1,5 @@
 diff --git a/mux.c b/mux.c
-index cdc01bd..c8d3c5a 100644
+index cdc01bd..d7aab62 100644
 --- a/mux.c
 +++ b/mux.c
 @@ -29,6 +29,7 @@
@@ -40,7 +40,7 @@ index cdc01bd..c8d3c5a 100644
  	/* Gather fds from client */
 +#ifdef __NO_FDPASS
 +	for(i = 1; i < 3; i++) {
-+		if ((new_fd[i] = process_mux_fdpass(c->sock)) > 0) {
++		if ((new_fd[i] = process_mux_fdpass(c->sock)) >= 0) {
 +			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
 +		} else {
 +#else
@@ -50,9 +50,9 @@ index cdc01bd..c8d3c5a 100644
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
 +#ifdef __NO_FDPASS
- 			for (j = 0; j < i; j++)
-+#else
 +			for (j = 1; j < i; j++)
++#else
+ 			for (j = 0; j < i; j++)
 +#endif
  				close(new_fd[j]);
  			for (j = 0; j < env_len; j++)
@@ -72,7 +72,7 @@ index cdc01bd..c8d3c5a 100644
  	/* Gather fds from client */
 +#ifdef __NO_FDPASS
 +	for(i = 1; i < 2; i++) {
-+		if ((new_fd[i] = process_mux_fdpass(c->sock)) > 0) {
++		if ((new_fd[i] = process_mux_fdpass(c->sock)) >= 0) {
 +			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
 +		} else {
 +#else
@@ -104,7 +104,7 @@ index cdc01bd..c8d3c5a 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: session request sent", __func__);
-@@ -1894,6 +1934,43 @@ mux_client_request_session(int fd)
+@@ -1894,6 +1934,40 @@ mux_client_request_session(int fd)
  	if (tty_flag)
  		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
  
@@ -127,16 +127,30 @@ index cdc01bd..c8d3c5a 100644
 +			break;
 +		} else {
 +			if (FD_ISSET(STDIN_FILENO, &activeset))
-+				written = mux_redirect(STDIN_FILENO, muxfd[1]);
++				if ((written = mux_redirect(STDIN_FILENO, muxfd[1])) == 0) {
++					shutdown(muxfd[1], SHUT_WR);
++					FD_CLR(STDIN_FILENO, &readset);
++				}
 +			if (FD_ISSET(muxfd[1], &activeset))
-+				written = mux_redirect(muxfd[1], STDOUT_FILENO);
-+			if (FD_ISSET(muxfd[STDERR_FILENO], &activeset))
-+				written = mux_redirect(muxfd[2], STDERR_FILENO);
++				if ((written = mux_redirect(muxfd[1], STDOUT_FILENO)) == 0)
++					FD_CLR(muxfd[1], &readset);
++			if (FD_ISSET(muxfd[2], &activeset))
++				if ((written = mux_redirect(muxfd[2], STDERR_FILENO)) == 0)
++					FD_CLR(muxfd[2], &readset);
 +			if (FD_ISSET(fd, &activeset) || written == 0)
-+				goto cleanup; // close request or closed FDs
++				break;
 +		}
 +	} while(1);
-+cleanup:
++#endif
+ 	/*
+ 	 * Stick around until the controlee closes the client_fd.
+ 	 * Before it does, it is expected to write an exit message.
+@@ -1932,6 +2006,17 @@ mux_client_request_session(int fd)
+ 		}
+ 	}
+ 
++#ifdef __NOFDPASS
++	debug3("%s: cleaning up file descriptors", __func__);
 +	for(i = 1; i < 3; i++) {
 +		close(muxfd[i]);
 +		if (muxsock[i] != NULL) {
@@ -145,10 +159,11 @@ index cdc01bd..c8d3c5a 100644
 +		}
 +	}
 +#endif
- 	/*
- 	 * Stick around until the controlee closes the client_fd.
- 	 * Before it does, it is expected to write an exit message.
-@@ -1988,8 +2065,12 @@ mux_client_request_stdio_fwd(int fd)
++
+ 	close(fd);
+ 	if (rawmode)
+ 		leave_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
+@@ -1988,8 +2073,12 @@ mux_client_request_stdio_fwd(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
@@ -161,7 +176,7 @@ index cdc01bd..c8d3c5a 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: stdio forward request sent", __func__);
-@@ -2198,3 +2279,127 @@ muxclient(const char *path)
+@@ -2198,3 +2287,128 @@ muxclient(const char *path)
  		fatal("unrecognised muxclient_command %d", muxclient_command);
  	}
  }
@@ -191,7 +206,7 @@ index cdc01bd..c8d3c5a 100644
 +		error("%s: asprintf: %s", __func__, strerror(errno));
 +		return -1;
 +	}
-+	if ((sock = unix_listener(path, 1, 0)) < 0) {
++	if ((sock = unix_listener(path, 2, 0)) < 0) {
 +		free(path);
 +		error("%s: socket: %s", __func__, strerror(errno));
 +		return -1;
@@ -215,6 +230,7 @@ index cdc01bd..c8d3c5a 100644
 +		error("%s: accept: %s", __func__, strerror(errno));
 +		return -1;
 +	}
++	debug3("%s: accepted client on socket %s", __func__, path);
 +
 +	muxfd[fdpass_out] = ffd; // stores only 1=>I/O 2=>ERR
 +	muxsock[fdpass_out] = path;
@@ -248,7 +264,7 @@ index cdc01bd..c8d3c5a 100644
 +		error("%s: socket: %s", __func__, strerror(errno));
 +		return -1;
 +	}
-+	memset(&remote, 0, sizeof(remote));
++	memset(&remote, '\0', sizeof(remote));
 +	remote.sun_family = AF_UNIX;
 +	if (strlcpy(remote.sun_path, path,
 +	    sizeof(remote.sun_path)) >= sizeof(remote.sun_path)) {
@@ -280,9 +296,9 @@ index cdc01bd..c8d3c5a 100644
 +		return result; // written size
 +	} else if (result == 0) {
 +		//close, FD_CLEAR
-+		printf("Closing fd %d\n", source);
-+		close(target);
-+		return result; // propagete close?
++		//printf("Closing fd %d\n", source);
++		//close(target); // can't close socket yet since it is both way
++		return result; // propagete information about closing fd
 +	} else {
 +		printf("Error in read(): %s\n", strerror(errno));
 +		return -1;
