@@ -1,5 +1,5 @@
 diff --git a/mux.c b/mux.c
-index cdc01bd..d7aab62 100644
+index cdc01bd..7337bad 100644
 --- a/mux.c
 +++ b/mux.c
 @@ -29,6 +29,7 @@
@@ -104,7 +104,7 @@ index cdc01bd..d7aab62 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: session request sent", __func__);
-@@ -1894,6 +1934,40 @@ mux_client_request_session(int fd)
+@@ -1894,6 +1934,43 @@ mux_client_request_session(int fd)
  	if (tty_flag)
  		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
  
@@ -118,7 +118,7 @@ index cdc01bd..d7aab62 100644
 +		FD_SET(muxfd[2], &readset);
 +	FD_SET(fd, &readset);
 +	maxfd = MAX(MAX(muxfd[1], muxfd[2]), fd);
-+	do {
++	for (exitval = 255, exitval_seen = 0;;) {
 +		activeset = readset;
 +		res = select(maxfd+1, &activeset, NULL, NULL, NULL);
 +		//debug3("select returned %d\n", res);
@@ -137,18 +137,32 @@ index cdc01bd..d7aab62 100644
 +			if (FD_ISSET(muxfd[2], &activeset))
 +				if ((written = mux_redirect(muxfd[2], STDERR_FILENO)) == 0)
 +					FD_CLR(muxfd[2], &readset);
-+			if (FD_ISSET(fd, &activeset) || written == 0)
-+				break;
++			if (FD_ISSET(fd, &activeset) || written == 0) {
++				goto handle_messages;
++			}
++			continue;
 +		}
-+	} while(1);
-+#endif
++handle_messages:
++#else
++
  	/*
  	 * Stick around until the controlee closes the client_fd.
  	 * Before it does, it is expected to write an exit message.
-@@ -1932,6 +2006,17 @@ mux_client_request_session(int fd)
+@@ -1902,6 +1979,7 @@ mux_client_request_session(int fd)
+ 	 * terminate early too (possibly losing data).
+ 	 */
+ 	for (exitval = 255, exitval_seen = 0;;) {
++#endif
+ 		buffer_clear(&m);
+ 		if (mux_client_read_packet(fd, &m) != 0)
+ 			break;
+@@ -1930,7 +2008,19 @@ mux_client_request_session(int fd)
+ 			e = buffer_get_string(&m, NULL);
+ 			fatal("%s: master returned error: %s", __func__, e);
  		}
- 	}
- 
++
++	}
++
 +#ifdef __NOFDPASS
 +	debug3("%s: cleaning up file descriptors", __func__);
 +	for(i = 1; i < 3; i++) {
@@ -157,13 +171,12 @@ index cdc01bd..d7aab62 100644
 +			unlink(muxsock[i]);
 +			free(muxsock[i]);
 +		}
-+	}
+ 	}
 +#endif
-+
+ 
  	close(fd);
  	if (rawmode)
- 		leave_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
-@@ -1988,8 +2073,12 @@ mux_client_request_stdio_fwd(int fd)
+@@ -1988,8 +2078,12 @@ mux_client_request_stdio_fwd(int fd)
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
@@ -176,7 +189,7 @@ index cdc01bd..d7aab62 100644
  		fatal("%s: send fds failed", __func__);
  
  	debug3("%s: stdio forward request sent", __func__);
-@@ -2198,3 +2287,128 @@ muxclient(const char *path)
+@@ -2198,3 +2292,128 @@ muxclient(const char *path)
  		fatal("unrecognised muxclient_command %d", muxclient_command);
  	}
  }
