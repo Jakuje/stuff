@@ -2,14 +2,6 @@ diff --git a/mux.c b/mux.c
 index cdc01bd..8a811a9 100644
 --- a/mux.c
 +++ b/mux.c
-@@ -29,6 +29,7 @@
-  *   - If we ever support the "signal" channel request, send signals on
-  *     sessions in master.
-  */
-+#define __NO_FDPASS
- 
- #include "includes.h"
- 
 @@ -146,6 +147,7 @@ struct mux_master_state {
  #define MUX_C_CLOSE_FWD		0x10000007
  #define MUX_C_NEW_STDIO_FWD	0x10000008
@@ -22,7 +14,7 @@ index cdc01bd..8a811a9 100644
  static int process_mux_stdio_fwd(u_int, Channel *, Buffer *, Buffer *);
  static int process_mux_stop_listening(u_int, Channel *, Buffer *, Buffer *);
  
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +int muxfd[3];
 +char *muxsock[3];
 +
@@ -38,7 +30,7 @@ index cdc01bd..8a811a9 100644
  	cmd = NULL;
  
  	/* Gather fds from client */
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	for(i = 1; i < 3; i++) {
 +		if ((new_fd[i] = process_mux_fdpass(c->sock)) >= 0) {
 +			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
@@ -49,7 +41,7 @@ index cdc01bd..8a811a9 100644
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +			for (j = 1; j < i; j++)
 +#else
  			for (j = 0; j < i; j++)
@@ -70,7 +62,7 @@ index cdc01bd..8a811a9 100644
  	    __func__, c->self, chost, cport);
  
  	/* Gather fds from client */
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	for(i = 1; i < 2; i++) {
 +		if ((new_fd[i] = process_mux_fdpass(c->sock)) >= 0) {
 +			new_fd[0] = new_fd[1]; // stdin and stdout is going through the same socket
@@ -81,7 +73,7 @@ index cdc01bd..8a811a9 100644
 +#endif
  			error("%s: failed to receive fd %d from slave",
  			    __func__, i);
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +			for (j = 1; j < i; j++)
 +#else
  			for (j = 0; j < i; j++)
@@ -93,7 +85,7 @@ index cdc01bd..8a811a9 100644
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	if (mux_client_fdpass(fd, STDIN_FILENO, STDOUT_FILENO) == -1 ||
 +	    mux_client_fdpass(fd, -1, STDERR_FILENO) == -1)
 +#else
@@ -108,7 +100,7 @@ index cdc01bd..8a811a9 100644
  	if (tty_flag)
  		enter_raw_mode(options.request_tty == REQUEST_TTY_FORCE);
  
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	fd_set readset, activeset;
 +	int maxfd, res, fds = 3;
 +	FD_ZERO(&readset);
@@ -170,7 +162,7 @@ index cdc01bd..8a811a9 100644
  		}
  	}
  
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	debug3("%s: cleaning up file descriptors", __func__);
 +	for(i = 1; i < 3; i++) {
 +		close(muxfd[i]);
@@ -188,7 +180,7 @@ index cdc01bd..8a811a9 100644
  		fatal("%s: write packet: %s", __func__, strerror(errno));
  
  	/* Send the stdio file descriptors */
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +	if (mux_client_fdpass(fd, STDIN_FILENO, STDOUT_FILENO) == -1)
 +#else
  	if (mm_send_fd(fd, STDIN_FILENO) == -1 ||
@@ -202,7 +194,7 @@ index cdc01bd..8a811a9 100644
  	}
  }
 +
-+#ifdef __NO_FDPASS
++#ifdef HAVE_CYGWIN
 +static int
 +mux_client_fdpass(int fd, int fdpass_in, int fdpass_out)
 +{
