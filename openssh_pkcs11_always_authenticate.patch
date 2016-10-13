@@ -1,15 +1,15 @@
-From af5c69ea76532bb888b33ee3d4e9c6cdc1e07091 Mon Sep 17 00:00:00 2001
+From de42412e800318eecd45bc87f2ac9ee480f8f533 Mon Sep 17 00:00:00 2001
 From: Jakub Jelen <jjelen@redhat.com>
 Date: Thu, 13 Oct 2016 10:48:12 +0200
-Subject: [PATCH] Honour PKCS#11 CKA_ALWAYS_AUTHENTICATE attribute of the
+Subject: [PATCH] Honor PKCS#11 CKA_ALWAYS_AUTHENTICATE attribute of the
  private objects and try to reauthenticate before use
 
 ---
- ssh-pkcs11.c | 44 ++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 44 insertions(+)
+ ssh-pkcs11.c | 48 +++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 47 insertions(+), 1 deletion(-)
 
 diff --git a/ssh-pkcs11.c b/ssh-pkcs11.c
-index 2612444..15f0a9b 100644
+index 2612444..f0c852d 100644
 --- a/ssh-pkcs11.c
 +++ b/ssh-pkcs11.c
 @@ -252,6 +252,48 @@ pkcs11_find(struct pkcs11_provider *p, CK_ULONG slotidx, CK_ATTRIBUTE *attr,
@@ -61,11 +61,29 @@ index 2612444..15f0a9b 100644
  /* openssl callback doing the actual signing operation */
  static int
  pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
-@@ -323,6 +365,8 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+@@ -274,7 +316,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+ 		{CKA_SIGN, NULL, sizeof(true_val) }
+ 	};
+ 	char			*pin = NULL, prompt[1024];
+-	int			rval = -1;
++	int			rval = -1, login_performed = 0;
+ 
+ 	key_filter[0].pValue = &private_key_class;
+ 	key_filter[2].pValue = &true_val;
+@@ -316,6 +358,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+ 			return (-1);
+ 		}
+ 		si->logged_in = 1;
++		login_performed = 1;
+ 	}
+ 	key_filter[1].pValue = k11->keyid;
+ 	key_filter[1].ulValueLen = k11->keyid_len;
+@@ -323,6 +366,9 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
  	if (pkcs11_find(k11->provider, k11->slotidx, key_filter, 3, &obj) < 0 &&
  	    pkcs11_find(k11->provider, k11->slotidx, key_filter, 2, &obj) < 0) {
  		error("cannot find private key");
-+	} else if (pkcs11_always_authenticate(k11->provider, si, obj) < 0) {
++	} else if (!login_performed &&
++	    pkcs11_always_authenticate(k11->provider, si, obj) < 0) {
 +		error("Failed to re-authenticate to access ALWAYS_AUTHENTICATE object");
  	} else if ((rv = f->C_SignInit(si->session, &mech, obj)) != CKR_OK) {
  		error("C_SignInit failed: %lu", rv);
