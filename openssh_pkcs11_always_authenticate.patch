@@ -1,18 +1,25 @@
-From de42412e800318eecd45bc87f2ac9ee480f8f533 Mon Sep 17 00:00:00 2001
+From 72794af487059cba1729698840d9b9ac825080f4 Mon Sep 17 00:00:00 2001
 From: Jakub Jelen <jjelen@redhat.com>
 Date: Thu, 13 Oct 2016 10:48:12 +0200
 Subject: [PATCH] Honor PKCS#11 CKA_ALWAYS_AUTHENTICATE attribute of the
- private objects and try to reauthenticate before use
+ private objects
 
+ * PKCS#11 does not require PIN for the first private key operation
+   * ssh  process is using only single operation
+ * The second operation fails, unless reauthenticated before
+   * ssh-agent  process can sign more authentication requests
+   * ssh-agent  can get PIN using SSH_ASKPASS prompt
+ * we can't read the attribute before we do use the key (private)
+   * we could cache the attribute by modifying storage structures
 ---
- ssh-pkcs11.c | 48 +++++++++++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 47 insertions(+), 1 deletion(-)
+ ssh-pkcs11.c | 49 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 48 insertions(+), 1 deletion(-)
 
 diff --git a/ssh-pkcs11.c b/ssh-pkcs11.c
-index 2612444..f0c852d 100644
+index 2612444..0e9319f 100644
 --- a/ssh-pkcs11.c
 +++ b/ssh-pkcs11.c
-@@ -252,6 +252,48 @@ pkcs11_find(struct pkcs11_provider *p, CK_ULONG slotidx, CK_ATTRIBUTE *attr,
+@@ -252,6 +252,49 @@ pkcs11_find(struct pkcs11_provider *p, CK_ULONG slotidx, CK_ATTRIBUTE *attr,
  	return (ret);
  }
  
@@ -23,19 +30,18 @@ index 2612444..f0c852d 100644
 +	CK_RV			rv;
 +	CK_FUNCTION_LIST	*f;
 +	CK_SESSION_HANDLE	session;
-+	CK_BBOOL			always_authenticate = 0;
++	CK_BBOOL		always_authenticate = 0;
 +	CK_ATTRIBUTE template = { CKA_ALWAYS_AUTHENTICATE, &always_authenticate, 1};
 +	char			*pin = NULL, prompt[1024];
 +
 +	f = p->function_list;
 +	session = si->session;
 +	rv = f->C_GetAttributeValue(session, obj, &(template), 1);
-+	if (rv != CKR_OK || always_authenticate == 0) {
-+		/* card does not know the attribute -- no need to reauthenticate */
-+		return 0;
++	if (rv != CKR_OK || always_authenticate == CK_FALSE) {
++		/* not needed */
++		return (0);
 +	}
 +
-+	/* attempt to get a pin from the user use ASKPASS from ssh-agent */
 +	if (si->token.flags & CKF_PROTECTED_AUTHENTICATION_PATH)
 +		verbose("Deferring PIN entry to reader keypad.");
 +	else {
@@ -45,23 +51,25 @@ index 2612444..f0c852d 100644
 +		if (pin == NULL)
 +			return (-1);	/* bail out */
 +	}
++	/* context specific login */
 +	rv = f->C_Login(session, CKU_CONTEXT_SPECIFIC, (u_char *)pin,
 +		(pin != NULL) ? strlen(pin) : 0);
++
 +	if (pin != NULL) {
 +		explicit_bzero(pin, strlen(pin));
 +		free(pin);
 +	}
 +	if (rv != CKR_OK) {
-+		return -1;
++		return (-1);
 +	}
 +	/* authentication successful */
-+	return 0;
++	return (0);
 +}
 +
  /* openssl callback doing the actual signing operation */
  static int
  pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
-@@ -274,7 +316,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+@@ -274,7 +317,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
  		{CKA_SIGN, NULL, sizeof(true_val) }
  	};
  	char			*pin = NULL, prompt[1024];
@@ -70,7 +78,7 @@ index 2612444..f0c852d 100644
  
  	key_filter[0].pValue = &private_key_class;
  	key_filter[2].pValue = &true_val;
-@@ -316,6 +358,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+@@ -316,6 +359,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
  			return (-1);
  		}
  		si->logged_in = 1;
@@ -78,7 +86,7 @@ index 2612444..f0c852d 100644
  	}
  	key_filter[1].pValue = k11->keyid;
  	key_filter[1].ulValueLen = k11->keyid_len;
-@@ -323,6 +366,9 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+@@ -323,6 +367,9 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
  	if (pkcs11_find(k11->provider, k11->slotidx, key_filter, 3, &obj) < 0 &&
  	    pkcs11_find(k11->provider, k11->slotidx, key_filter, 2, &obj) < 0) {
  		error("cannot find private key");
