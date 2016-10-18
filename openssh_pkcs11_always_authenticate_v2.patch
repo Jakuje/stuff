@@ -1,0 +1,100 @@
+From fdfeb4c6c88dcf93681b9d3088b89bd535d2d554 Mon Sep 17 00:00:00 2001
+From: Jakub Jelen <jjelen@redhat.com>
+Date: Thu, 13 Oct 2016 10:48:12 +0200
+Subject: [PATCH] Honor PKCS#11 CKA_ALWAYS_AUTHENTICATE attribute of the
+ private objects
+
+ * PKCS#11 does not require PIN for the first private key operation
+   * ssh  process is using only single operation
+ * The second operation fails, unless reauthenticated immediately
+   after opening the sign session in the  C_SignInit  function in
+   ssh-agent when signing more authentication requests
+   * it can get PIN using SSH_ASKPASS prompt
+ * we can't read the attribute before we do use the key (private)
+   * we could cache the attribute by modifying storage structures
+---
+ ssh-pkcs11.c | 46 +++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/ssh-pkcs11.c b/ssh-pkcs11.c
+index 2612444..9423357 100644
+--- a/ssh-pkcs11.c
++++ b/ssh-pkcs11.c
+@@ -252,6 +252,37 @@ pkcs11_find(struct pkcs11_provider *p, CK_ULONG slotidx, CK_ATTRIBUTE *attr,
+ 	return (ret);
+ }
+ 
++int
++pkcs11_always_authenticate(struct pkcs11_provider *p,
++    struct pkcs11_slotinfo *si)
++{
++	CK_RV			rv;
++	char			*pin = NULL, prompt[1024];
++
++	if (si->token.flags & CKF_PROTECTED_AUTHENTICATION_PATH)
++		verbose("Deferring PIN entry to reader keypad.");
++	else {
++		snprintf(prompt, sizeof(prompt),
++		    "Enter PIN for '%s': ", si->token.label);
++		pin = read_passphrase(prompt, RP_ALLOW_EOF);
++		if (pin == NULL)
++			return (-1);	/* bail out */
++	}
++	/* context specific login */
++	rv = p->function_list->C_Login(si->session, CKU_CONTEXT_SPECIFIC,
++	    (u_char *)pin, (pin != NULL) ? strlen(pin) : 0);
++
++	if (pin != NULL) {
++		explicit_bzero(pin, strlen(pin));
++		free(pin);
++	}
++	if (rv != CKR_OK) {
++		return (-1);
++	}
++	/* authentication successful */
++	return (0);
++}
++
+ /* openssl callback doing the actual signing operation */
+ static int
+ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+@@ -273,6 +304,9 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+ 		{CKA_ID, NULL, 0},
+ 		{CKA_SIGN, NULL, sizeof(true_val) }
+ 	};
++	CK_BBOOL		need_authenticate = CK_TRUE;
++	CK_ATTRIBUTE 		aauth_template =
++		{CKA_ALWAYS_AUTHENTICATE, &need_authenticate, 1};
+ 	char			*pin = NULL, prompt[1024];
+ 	int			rval = -1;
+ 
+@@ -316,6 +350,7 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+ 			return (-1);
+ 		}
+ 		si->logged_in = 1;
++		need_authenticate = CK_FALSE; /* no need to reauthenticate */
+ 	}
+ 	key_filter[1].pValue = k11->keyid;
+ 	key_filter[1].ulValueLen = k11->keyid_len;
+@@ -323,8 +358,17 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
+ 	if (pkcs11_find(k11->provider, k11->slotidx, key_filter, 3, &obj) < 0 &&
+ 	    pkcs11_find(k11->provider, k11->slotidx, key_filter, 2, &obj) < 0) {
+ 		error("cannot find private key");
+-	} else if ((rv = f->C_SignInit(si->session, &mech, obj)) != CKR_OK) {
++		return (-1);
++	}
++	if (need_authenticate &&
++	    f->C_GetAttributeValue(si->session, obj, &(aauth_template), 1) != CKR_OK) {
++		need_authenticate = 0;
++	}
++	if ((rv = f->C_SignInit(si->session, &mech, obj)) != CKR_OK) {
+ 		error("C_SignInit failed: %lu", rv);
++	} else if (need_authenticate == CK_TRUE &&
++	    pkcs11_always_authenticate(k11->provider, si) < 0) {
++		error("Failed to re-authenticate to access ALWAYS_AUTHENTICATE object");
+ 	} else {
+ 		/* XXX handle CKR_BUFFER_TOO_SMALL */
+ 		tlen = RSA_size(rsa);
+-- 
+2.7.4
+
