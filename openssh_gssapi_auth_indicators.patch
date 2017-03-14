@@ -61,7 +61,7 @@ index 166b8ff..0fb35c4 100644
 +verify_authentication_indicators(Gssctxt *gssctxt)
 +{
 +	gss_buffer_desc attr;
-+	attr.value = "auth-indicator";
++	attr.value = "auth-indicators";
 +	attr.length = strlen(attr.value) + 1;
 +	int authenticated = 0, complete = 0, more = -1;
 +	gss_buffer_desc value = {0, NULL};
