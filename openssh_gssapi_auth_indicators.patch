@@ -84,7 +84,7 @@ index 166b8ff..0fb35c4 100644
 +		    gssctxt->client, &attr, &authenticated,
 +		    &complete, &value, &display_value, &more);
 +
-+		logit("%s: gss_get_name_attribute = %d", __func__, maj_status);
++		logit("%s: gss_get_name_attribute = 0x%.8X", __func__, maj_status);
 +		/* no auth indicators in the ticket: reject access  */
 +		if (maj_status != GSS_S_COMPLETE)
 +			break;
