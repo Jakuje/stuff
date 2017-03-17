@@ -62,7 +62,7 @@ index 166b8ff..0fb35c4 100644
 +{
 +	gss_buffer_desc attr;
 +	attr.value = "auth-indicators";
-+	attr.length = strlen(attr.value) + 1;
++	attr.length = strlen(attr.value);
 +	int authenticated = 0, complete = 0, more = -1;
 +	gss_buffer_desc value = {0, NULL};
 +	gss_buffer_desc display_value = {0, NULL};
