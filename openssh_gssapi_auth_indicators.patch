@@ -121,9 +121,9 @@ index f8e20ed..8effe51 100644
 --- a/monitor.c
 +++ b/monitor.c
 @@ -2263,7 +2263,7 @@ mm_answer_gss_userok(int sock, Buffer *m)
- 		fatal("In GSSAPI monitor when GSSAPI is disabled");
+ 		fatal("%s: GSSAPI authentication not enabled", __func__);
  
- 	authenticated = authctxt->valid && 
+ 	authenticated = authctxt->valid &&
 -	    ssh_gssapi_userok(authctxt->user, authctxt->pw);
 +	    ssh_gssapi_userok(authctxt->user, authctxt->pw, gsscontext);
  
@@ -198,12 +198,12 @@ index 514b59e..1106612 100644
  		break;
  
 +	case sGssRequiredAuthIndicators:
-+		arg = strdelim(&cp);
-+		if (!arg || *arg == '\0')
++		if (cp == NULL || *cp == '\0')
 +			fatal("%.200s line %d: Missing argument.",
 +			    filename, linenum);
++		len = strspn(cp, WHITESPACE "=");
 +		if (*activep && options->gss_required_auth_indicators == NULL)
-+			options->gss_required_auth_indicators = xstrdup(arg);
++			options->gss_required_auth_indicators = xstrdup(cp + len);
 +		break;
 +
  	case sPasswordAuthentication:
