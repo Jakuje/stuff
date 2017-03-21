@@ -242,3 +242,20 @@ index 6f2b0ac..4e4a99b 100644
  char* ssh_gssapi_get_displayname(void);
  OM_uint32 ssh_gssapi_checkmic(Gssctxt *, gss_buffer_t, gss_buffer_t);
  void ssh_gssapi_do_child(char ***, u_int *);
+diff --git a/sshd_config.5 b/sshd_config.5
+index 92c0f17..4dea84e 100644
+--- a/sshd_config.5
++++ b/sshd_config.5
+@@ -632,6 +632,12 @@ Specifies whether to automatically destroy the user's credentials cache
+ on logout.
+ The default is
+ .Cm yes .
++.It Cm GSSAPIRequiredAuthIndicators
++Allow GSSSAPI authentication only for tokens having set auth-indicator
++to these values. Accepts space separated list of accepted authentication
++indicators.
++The default is
++.Cm none .
+ .It Cm GSSAPIStrictAcceptorCheck
+ Determines whether to be strict about the identity of the GSSAPI acceptor
+ a client authenticates against.
